@@ -8,6 +8,12 @@ const state = {
   structuredDirty: false,
   structuredDescriptionsDirty: false,
   commandTimer: null,
+  motion: {
+    reports: [],
+    selectedRunId: null,
+    selectedDomain: null,
+    data: null,
+  },
   pathEditor: {
     data: null,
     points: [],
@@ -96,6 +102,11 @@ function fmtSec(value) {
 function fmtDate(value) {
   if (!value) return "-";
   return String(value).replace("T", " ").replace(/\+.*/, "");
+}
+
+function fmtNum(value, digits = 3, suffix = "") {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return `${Number(value).toFixed(digits)}${suffix}`;
 }
 
 async function loadState() {
@@ -1313,6 +1324,7 @@ async function refreshHistory() {
   const data = await api("/api/history");
   renderLapHistory(data.outputs || []);
   renderReports(data.reports || []);
+  await renderMotionRunPicker(data.reports || []);
 }
 
 function renderLapHistory(rows) {
@@ -1360,6 +1372,237 @@ function renderReports(rows) {
     .join("");
 }
 
+async function renderMotionRunPicker(rows) {
+  state.motion.reports = rows.filter((row) => row.motion_log_available);
+  const select = $("motionRun");
+  const previous = state.motion.selectedRunId || select.value;
+  select.innerHTML = "";
+  for (const row of state.motion.reports) {
+    const option = document.createElement("option");
+    option.value = row.run_id;
+    option.textContent = row.run_id;
+    option.selected = row.run_id === previous;
+    select.appendChild(option);
+  }
+  if (!state.motion.reports.length) {
+    state.motion.selectedRunId = null;
+    state.motion.selectedDomain = null;
+    state.motion.data = null;
+    renderMotionEmpty("まだmotion logがないよ。EVAL後かDEV後にlog化してね。");
+    return;
+  }
+  state.motion.selectedRunId = select.value || state.motion.reports[0].run_id;
+  select.value = state.motion.selectedRunId;
+  if (!state.motion.data || state.motion.data.run_id !== state.motion.selectedRunId) {
+    await loadMotionLog();
+  }
+}
+
+async function loadMotionLog() {
+  const runId = $("motionRun").value;
+  if (!runId) {
+    renderMotionEmpty("表示するrunを選んでね。");
+    return;
+  }
+  const domain = $("motionDomain").value || state.motion.selectedDomain || "";
+  const params = new URLSearchParams({ run_id: runId });
+  if (domain) params.set("domain", domain);
+  const data = await api(`/api/motion-log?${params.toString()}`);
+  state.motion.selectedRunId = data.run_id;
+  state.motion.selectedDomain = data.domain_id || "";
+  state.motion.data = data;
+  renderMotionDomainPicker(data);
+  renderMotionLog(data);
+}
+
+function renderMotionDomainPicker(data) {
+  const select = $("motionDomain");
+  const previous = state.motion.selectedDomain || data.domain_id || "";
+  select.innerHTML = "";
+  for (const domain of data.domains || []) {
+    const option = document.createElement("option");
+    option.value = domain;
+    option.textContent = domain;
+    option.selected = domain === previous;
+    select.appendChild(option);
+  }
+  select.disabled = !(data.domains || []).length;
+  if (data.domain_id) {
+    select.value = data.domain_id;
+    state.motion.selectedDomain = data.domain_id;
+  }
+}
+
+function renderMotionLog(data) {
+  if (!data.points?.length) {
+    renderMotionEmpty("このrunには表示できるmotion sampleがないよ。");
+    return;
+  }
+  drawMotionChart(data.points);
+  const stats = data.stats || {};
+  $("motionStats").innerHTML = `
+    <dt>duration</dt><dd>${fmtSec(stats.duration_sec)}</dd>
+    <dt>samples</dt><dd>${escapeHtml(stats.samples ?? "-")}</dd>
+    <dt>max speed</dt><dd>${fmtNum(stats.max_speed_mps, 3, " m/s")}</dd>
+    <dt>max accel</dt><dd>${fmtNum(stats.max_abs_acceleration_mps2, 3, " m/s²")}</dd>
+    <dt>max steer</dt><dd>${fmtNum(stats.max_abs_steering_rad ?? stats.max_abs_command_steering_rad, 3, " rad")}</dd>
+  `;
+  const links = Object.entries(data.paths || {})
+    .filter(([, path]) => path)
+    .map(([label, path]) => {
+      const href = `/files?path=${encodeURIComponent(path)}`;
+      return `<a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+    });
+  $("motionLinks").innerHTML = links.length ? links.join("") : "";
+}
+
+function renderMotionEmpty(message) {
+  const canvas = $("motionChart");
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = chartColor("--muted");
+  ctx.font = "13px system-ui, sans-serif";
+  ctx.fillText(message, 14, 28);
+  $("motionStats").innerHTML = "";
+  $("motionLinks").innerHTML = "";
+  $("motionDomain").innerHTML = "";
+  $("motionDomain").disabled = true;
+}
+
+function drawMotionChart(points) {
+  const canvas = $("motionChart");
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const panels = [
+    {
+      label: "speed [m/s]",
+      keys: [
+        { key: "speed_mps", label: "actual", color: "#2457a6" },
+        { key: "target_speed_mps", label: "target", color: "#718096" },
+      ],
+    },
+    {
+      label: "accel [m/s²]",
+      keys: [
+        { key: "acceleration_mps2", label: "actual", color: "#956218" },
+        { key: "command_accel_mps2", label: "cmd", color: "#c05621" },
+      ],
+    },
+    {
+      label: "steer [rad]",
+      keys: [
+        { key: "steering_rad", label: "actual", color: "#177245" },
+        { key: "command_steer_rad", label: "cmd", color: "#2f855a" },
+      ],
+    },
+  ];
+  const plotLeft = 54;
+  const plotRight = 12;
+  const plotTop = 16;
+  const plotGap = 12;
+  const panelHeight = (height - plotTop * 2 - plotGap * (panels.length - 1)) / panels.length;
+  const maxTime = Math.max(...points.map((point) => Number(point.time_sec || 0)), 1e-6);
+
+  ctx.font = "11px system-ui, sans-serif";
+  panels.forEach((panel, index) => {
+    const top = plotTop + index * (panelHeight + plotGap);
+    drawMotionPanel(ctx, points, panel, {
+      left: plotLeft,
+      top,
+      width: width - plotLeft - plotRight,
+      height: panelHeight,
+      maxTime,
+    });
+  });
+}
+
+function drawMotionPanel(ctx, points, panel, rect) {
+  const text = chartColor("--text");
+  const muted = chartColor("--muted");
+  const line = chartColor("--line");
+  const values = [];
+  for (const point of points) {
+    for (const series of panel.keys) {
+      const value = point[series.key];
+      if (Number.isFinite(Number(value))) values.push(Number(value));
+    }
+  }
+  if (!values.length) {
+    ctx.fillStyle = muted;
+    ctx.fillText(`${panel.label}: no data`, rect.left, rect.top + 16);
+    return;
+  }
+  let minY = Math.min(...values);
+  let maxY = Math.max(...values);
+  if (minY === maxY) {
+    minY -= 1;
+    maxY += 1;
+  }
+  const pad = (maxY - minY) * 0.08;
+  minY -= pad;
+  maxY += pad;
+  const xFor = (time) => rect.left + (Number(time || 0) / rect.maxTime) * rect.width;
+  const yFor = (value) => rect.top + rect.height - ((Number(value) - minY) / (maxY - minY)) * rect.height;
+
+  ctx.strokeStyle = line;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(rect.left, rect.top, rect.width, rect.height);
+  ctx.beginPath();
+  for (let i = 1; i < 4; i += 1) {
+    const y = rect.top + (rect.height / 4) * i;
+    ctx.moveTo(rect.left, y);
+    ctx.lineTo(rect.left + rect.width, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = text;
+  ctx.fillText(panel.label, 8, rect.top + 14);
+  ctx.fillStyle = muted;
+  ctx.fillText(maxY.toFixed(2), 8, rect.top + 28);
+  ctx.fillText(minY.toFixed(2), 8, rect.top + rect.height - 4);
+
+  for (const series of panel.keys) {
+    const seriesPoints = points.filter((point) => Number.isFinite(Number(point[series.key])));
+    if (!seriesPoints.length) continue;
+    ctx.strokeStyle = series.color;
+    ctx.lineWidth = series.label === "cmd" || series.label === "target" ? 1.4 : 2;
+    ctx.setLineDash(series.label === "cmd" || series.label === "target" ? [4, 4] : []);
+    ctx.beginPath();
+    seriesPoints.forEach((point, index) => {
+      const x = xFor(point.time_sec);
+      const y = yFor(point[series.key]);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.fillStyle = muted;
+  const legend = panel.keys.map((series) => series.label).join(" / ");
+  ctx.fillText(legend, rect.left + rect.width - 90, rect.top + 14);
+}
+
+function chartColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#64748b";
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -1400,9 +1643,20 @@ function bind() {
   $("runDev").addEventListener("click", () => run("dev").catch((e) => toast(e.message)));
   $("runEval").addEventListener("click", () => run("eval").catch((e) => toast(e.message)));
   $("runQuickEval").addEventListener("click", () => run("quick-eval").catch((e) => toast(e.message)));
+  $("runIngest").addEventListener("click", () => run("ingest").catch((e) => toast(e.message)));
   $("runDown").addEventListener("click", () => run("down").catch((e) => toast(e.message)));
   $("stopCommand").addEventListener("click", () => stopCommand().catch((e) => toast(e.message)));
   $("refreshDocker").addEventListener("click", () => refreshDocker().catch((e) => toast(e.message)));
+  $("refreshMotion").addEventListener("click", () => loadMotionLog().catch((e) => toast(e.message)));
+  $("motionRun").addEventListener("change", () => {
+    state.motion.selectedRunId = $("motionRun").value;
+    state.motion.selectedDomain = null;
+    loadMotionLog().catch((e) => toast(e.message));
+  });
+  $("motionDomain").addEventListener("change", () => {
+    state.motion.selectedDomain = $("motionDomain").value;
+    loadMotionLog().catch((e) => toast(e.message));
+  });
   $("savePreset").addEventListener("click", () => savePreset().catch((e) => toast(e.message)));
   $("restorePreset").addEventListener("click", () => restorePreset().catch((e) => toast(e.message)));
   $("pathLoad").addEventListener("click", () => loadSelectedPath().catch((e) => toast(e.message)));
@@ -1430,6 +1684,9 @@ function bind() {
   window.addEventListener("resize", () => {
     if (state.editorMode === "path") {
       drawPathEditor();
+    }
+    if (state.motion.data?.points?.length) {
+      drawMotionChart(state.motion.data.points);
     }
   });
 }
