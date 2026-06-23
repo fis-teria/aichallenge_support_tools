@@ -16,17 +16,21 @@ set -Eeuo pipefail
 #     old-driver cleanup step.
 #
 # Common overrides:
-#   DRIVER_SPEC=auto                 # auto, 595-open, 595, 580-open, etc.
+#   DRIVER_SPEC=auto                 # auto, 595-open, 595, 580-open, 535, etc.
 #   DRIVER_PROFILE=desktop           # desktop or gpgpu
 #   CUDA_TOOLKIT_PACKAGE=cuda-toolkit-12-8
 #   CONFIGURE_DOCKER=prompt          # prompt, yes, no
 #   FORCE_REPO_SETUP=0               # 1 to rewrite NVIDIA apt repo files
+#   UNHOLD_NVIDIA_DRIVER=no          # yes to unhold driver packages before install
+#   HOLD_NVIDIA_DRIVER=no            # yes to hold installed driver packages after install
 
 DRIVER_SPEC="${DRIVER_SPEC:-auto}"
 DRIVER_PROFILE="${DRIVER_PROFILE:-desktop}"
 CUDA_TOOLKIT_PACKAGE="${CUDA_TOOLKIT_PACKAGE:-cuda-toolkit-12-8}"
 CONFIGURE_DOCKER="${CONFIGURE_DOCKER:-prompt}"
 FORCE_REPO_SETUP="${FORCE_REPO_SETUP:-0}"
+UNHOLD_NVIDIA_DRIVER="${UNHOLD_NVIDIA_DRIVER:-no}"
+HOLD_NVIDIA_DRIVER="${HOLD_NVIDIA_DRIVER:-no}"
 
 SUDO=()
 if (( EUID != 0 )); then
@@ -85,11 +89,13 @@ list_installed_packages() {
         | awk '$1 == "ii" { print $2 "\t" $3 }'
 }
 
-list_installed_driver_packages() {
-    list_installed_packages \
-        | awk -F '\t' '
+list_driver_cleanup_packages() {
+    dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' 2>/dev/null \
+        | awk '
             {
-                pkg=$1
+                status=$1
+                pkg=$2
+                if (status != "ii" && status != "rc") next
                 if (pkg ~ /^nvidia-container-toolkit/) next
                 if (pkg ~ /^nvidia-container-runtime/) next
                 if (pkg ~ /^libnvidia-container/) next
@@ -99,17 +105,68 @@ list_installed_driver_packages() {
 
                 if (pkg ~ /^nvidia-driver-[0-9]/) print pkg
                 else if (pkg ~ /^nvidia-dkms-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-compute-[0-9]/) print pkg
                 else if (pkg ~ /^nvidia-kernel-(common|source)-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-kernel-[0-9]/) print pkg
                 else if (pkg ~ /^nvidia-compute-utils-[0-9]/) print pkg
                 else if (pkg ~ /^nvidia-utils-[0-9]/) print pkg
                 else if (pkg ~ /^nvidia-firmware-[0-9]/) print pkg
                 else if (pkg ~ /^nvidia-persistenced$/) print pkg
                 else if (pkg ~ /^libnvidia-(cfg1|common|compute|decode|encode|extra|fbc1|gl)-[0-9]/) print pkg
                 else if (pkg ~ /^xserver-xorg-video-nvidia-[0-9]/) print pkg
-                else if (pkg ~ /^linux-(modules|objects|signatures)-nvidia-[0-9]/) print pkg
+                else if (pkg ~ /^linux-modules-nvidia-[0-9]/) print pkg
+                else if (pkg ~ /^linux-objects-nvidia-[0-9]/) print pkg
+                else if (pkg ~ /^linux-signatures-nvidia-/) print pkg
             }
         ' \
         | sort -u
+}
+
+list_installed_driver_packages() {
+    dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' 2>/dev/null \
+        | awk '
+            {
+                status=$1
+                pkg=$2
+                if (status != "ii") next
+                if (pkg ~ /^nvidia-container-toolkit/) next
+                if (pkg ~ /^nvidia-container-runtime/) next
+                if (pkg ~ /^libnvidia-container/) next
+                if (pkg ~ /^cuda/) next
+                if (pkg ~ /^nvidia-cuda/) next
+                if (pkg ~ /^nsight/) next
+
+                if (pkg ~ /^nvidia-driver-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-dkms-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-compute-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-kernel-(common|source)-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-kernel-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-compute-utils-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-utils-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-firmware-[0-9]/) print pkg
+                else if (pkg ~ /^nvidia-persistenced$/) print pkg
+                else if (pkg ~ /^libnvidia-(cfg1|common|compute|decode|encode|extra|fbc1|gl)-[0-9]/) print pkg
+                else if (pkg ~ /^xserver-xorg-video-nvidia-[0-9]/) print pkg
+                else if (pkg ~ /^linux-modules-nvidia-[0-9]/) print pkg
+                else if (pkg ~ /^linux-objects-nvidia-[0-9]/) print pkg
+                else if (pkg ~ /^linux-signatures-nvidia-/) print pkg
+            }
+        ' \
+        | sort -u
+}
+
+normalize_yes_no() {
+    local name="$1"
+    local value="$2"
+    case "${value}" in
+        yes|no) ;;
+        *) die "${name} must be yes or no. Got ${value}." ;;
+    esac
+}
+
+validate_settings() {
+    normalize_yes_no UNHOLD_NVIDIA_DRIVER "${UNHOLD_NVIDIA_DRIVER}"
+    normalize_yes_no HOLD_NVIDIA_DRIVER "${HOLD_NVIDIA_DRIVER}"
 }
 
 show_current_state() {
@@ -137,17 +194,20 @@ show_current_state() {
 
 maybe_purge_old_driver_packages() {
     local -a packages
-    mapfile -t packages < <(list_installed_driver_packages)
+    mapfile -t packages < <(list_driver_cleanup_packages)
 
     if ((${#packages[@]} == 0)); then
         log "No installed NVIDIA driver packages were detected for cleanup."
         return
     fi
 
-    log "Detected installed NVIDIA driver packages"
+    log "Detected NVIDIA driver packages for cleanup"
     printf '  %s\n' "${packages[@]}"
 
     warn "The cleanup below is limited to NVIDIA driver packages only."
+    warn "It includes installed packages and residual-config packages such as rc entries."
+    warn "The cleanup includes nvidia-compute-utils, nvidia-dkms, nvidia-kernel,"
+    warn "linux-modules-nvidia, linux-objects-nvidia, and linux-signatures-nvidia packages."
     warn "CUDA packages and NVIDIA Container Toolkit packages are intentionally excluded."
     warn "General apt autoremove is intentionally not run automatically."
 
@@ -168,6 +228,68 @@ maybe_purge_old_driver_packages() {
 
     log "Purging selected NVIDIA driver packages."
     run "${SUDO[@]}" apt-get purge -y "${packages[@]}"
+}
+
+list_held_nvidia_driver_packages() {
+    apt-mark showhold 2>/dev/null \
+        | awk '
+            /^nvidia-driver-[0-9]/ { print; next }
+            /^nvidia-dkms-[0-9]/ { print; next }
+            /^nvidia-compute-[0-9]/ { print; next }
+            /^nvidia-kernel-(common|source)-[0-9]/ { print; next }
+            /^nvidia-kernel-[0-9]/ { print; next }
+            /^nvidia-compute-utils-[0-9]/ { print; next }
+            /^nvidia-utils-[0-9]/ { print; next }
+            /^nvidia-firmware-[0-9]/ { print; next }
+            /^nvidia-persistenced$/ { print; next }
+            /^libnvidia-(cfg1|common|compute|decode|encode|extra|fbc1|gl)-[0-9]/ { print; next }
+            /^xserver-xorg-video-nvidia-[0-9]/ { print; next }
+            /^linux-modules-nvidia-[0-9]/ { print; next }
+            /^linux-objects-nvidia-[0-9]/ { print; next }
+            /^linux-signatures-nvidia-/ { print; next }
+        ' \
+        | sort -u
+}
+
+maybe_unhold_nvidia_driver_packages() {
+    local -a held
+    mapfile -t held < <(list_held_nvidia_driver_packages)
+
+    if ((${#held[@]} == 0)); then
+        log "No held NVIDIA driver packages were detected."
+        return
+    fi
+
+    log "Detected held NVIDIA driver packages"
+    printf '  %s\n' "${held[@]}"
+
+    if [[ "${UNHOLD_NVIDIA_DRIVER}" != "yes" ]]; then
+        warn "Held packages can block driver upgrades or downgrades."
+        warn "Set UNHOLD_NVIDIA_DRIVER=yes to unhold them before installing another driver version."
+        return
+    fi
+
+    log "Unholding NVIDIA driver packages."
+    run "${SUDO[@]}" apt-mark unhold "${held[@]}"
+}
+
+hold_installed_nvidia_driver_packages() {
+    if [[ "${HOLD_NVIDIA_DRIVER}" != "yes" ]]; then
+        log "Skipped NVIDIA driver package hold."
+        return
+    fi
+
+    local -a packages
+    mapfile -t packages < <(list_installed_driver_packages)
+
+    if ((${#packages[@]} == 0)); then
+        warn "No installed NVIDIA driver packages were detected to hold."
+        return
+    fi
+
+    log "Holding installed NVIDIA driver packages."
+    printf '  %s\n' "${packages[@]}"
+    run "${SUDO[@]}" apt-mark hold "${packages[@]}"
 }
 
 install_prerequisites() {
@@ -225,13 +347,16 @@ install_nvidia_driver() {
 
     if [[ "${DRIVER_SPEC}" != "auto" ]]; then
         command+=("nvidia:${DRIVER_SPEC}")
+    elif [[ "${HOLD_NVIDIA_DRIVER}" == "yes" ]]; then
+        warn "HOLD_NVIDIA_DRIVER=yes with DRIVER_SPEC=auto can freeze whatever ubuntu-drivers selects."
+        warn "For old-version pinning, prefer DRIVER_SPEC=595-open, DRIVER_SPEC=535, etc."
     fi
 
     log "Installing NVIDIA driver with ubuntu-drivers."
     run "${command[@]}"
 
     log "Installing nvidia-modprobe to help create /dev/nvidia* nodes when needed."
-    run "${SUDO[@]}" apt-get install -y nvidia-modprobe
+    run "${SUDO[@]}" apt-get install -y --no-install-recommends nvidia-modprobe
 }
 
 install_cuda_toolkit() {
@@ -327,8 +452,10 @@ main() {
     require_ubuntu_2204
     require_supported_arch
     require_sudo
+    validate_settings
 
     show_current_state
+    maybe_unhold_nvidia_driver_packages
     maybe_purge_old_driver_packages
 
     install_prerequisites
@@ -337,6 +464,7 @@ main() {
     run "${SUDO[@]}" apt-get update
 
     install_nvidia_driver
+    hold_installed_nvidia_driver_packages
     install_cuda_toolkit
     install_container_toolkit
     verify_installation

@@ -37,6 +37,9 @@ tools/scripts/install_nvidia_stack_ubuntu2204.sh
 - 既存の NVIDIA driver 系パッケージを検出し、削除候補を表示します。
 - 削除前に `apt-get -s purge` の dry-run を表示します。
 - `REMOVE_NVIDIA_DRIVER_PACKAGES` と正確に入力した場合だけ driver 系を削除します。
+- cleanup 対象には `nvidia-compute-utils-*`、`nvidia-dkms-*`、
+  `nvidia-kernel-*`、`linux-modules-nvidia-*`、`linux-objects-nvidia-*`、
+  `linux-signatures-nvidia-*` も含めます。
 - `cuda-*`、`nvidia-cuda-toolkit`、`nvidia-container-toolkit`、
   `libnvidia-container*` は driver cleanup の削除対象から除外します。
 - NVIDIA driver、CUDA Toolkit、NVIDIA Container Toolkit を導入します。
@@ -54,6 +57,22 @@ driver を明示したい場合は `DRIVER_SPEC` を指定します。
 ```bash
 DRIVER_SPEC=595-open tools/scripts/install_nvidia_stack_ubuntu2204.sh
 ```
+
+古い driver を固定したい場合は `HOLD_NVIDIA_DRIVER=yes` を付けます。
+
+```bash
+DRIVER_SPEC=595-open HOLD_NVIDIA_DRIVER=yes tools/scripts/install_nvidia_stack_ubuntu2204.sh
+```
+
+固定済みの環境で別バージョンへ変更したい場合は、先に hold を解除します。
+
+```bash
+UNHOLD_NVIDIA_DRIVER=yes DRIVER_SPEC=535 tools/scripts/install_nvidia_stack_ubuntu2204.sh
+```
+
+`HOLD_NVIDIA_DRIVER=yes` と `DRIVER_SPEC=auto` を組み合わせると、
+`ubuntu-drivers` が選んだ版をそのまま固定します。古い版を意図して固定する場合は、
+`DRIVER_SPEC=595-open` や `DRIVER_SPEC=535` のように明示してください。
 
 CUDA Toolkit のバージョンを変えたい場合は `CUDA_TOOLKIT_PACKAGE` を指定します。
 
