@@ -109,6 +109,10 @@ function fmtNum(value, digits = 3, suffix = "") {
   return `${Number(value).toFixed(digits)}${suffix}`;
 }
 
+function valueOr(value, fallback) {
+  return value === null || value === undefined ? fallback : value;
+}
+
 async function loadState() {
   const data = await api("/api/state");
   state.app = data;
@@ -161,8 +165,8 @@ function renderState() {
 }
 
 function renderStatus(commandState) {
-  const running = commandState?.running;
-  const dirty = Boolean(state.app?.dirty_since);
+  const running = commandState && commandState.running;
+  const dirty = Boolean(state.app && state.app.dirty_since);
   const pill = $("statusPill");
   pill.className = "status-pill";
   if (running) {
@@ -220,7 +224,8 @@ async function openFile(path) {
 }
 
 function fileLabel(path) {
-  const file = state.app?.files.find((item) => item.path === path);
+  const files = state.app && state.app.files ? state.app.files : [];
+  const file = files.find((item) => item.path === path);
   return file ? file.label : path.split("/").pop();
 }
 
@@ -292,12 +297,12 @@ function renderScalarStructuredRows() {
   tbody.innerHTML = rows
     .map((row) => {
       return `<tr data-row-id="${escapeHtml(row.id)}">
-        <td>${escapeHtml(row.line ?? "")}</td>
+        <td>${escapeHtml(valueOr(row.line, ""))}</td>
         <td>${escapeHtml(row.path || row.label || "")}</td>
         <td>${escapeHtml(row.name || "")}</td>
         <td class="structured-type">${escapeHtml(row.type || "")}</td>
-        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(row.description ?? "")}"></td>
-        <td><input class="structured-value" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(row.value ?? "")}"></td>
+        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.description, ""))}"></td>
+        <td><input class="structured-value" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.value, ""))}"></td>
       </tr>`;
     })
     .join("");
@@ -338,13 +343,13 @@ function renderXmlStructuredRows() {
           if (!Object.prototype.hasOwnProperty.call(attrs, column)) {
             return "<td class=\"structured-empty\"></td>";
           }
-          return `<td><input class="structured-value xml-attr-value" data-row-id="${escapeHtml(row.id)}" data-attr="${escapeHtml(column)}" value="${escapeHtml(attrs[column] ?? "")}"></td>`;
+          return `<td><input class="structured-value xml-attr-value" data-row-id="${escapeHtml(row.id)}" data-attr="${escapeHtml(column)}" value="${escapeHtml(valueOr(attrs[column], ""))}"></td>`;
         })
         .join("");
       return `<tr data-row-id="${escapeHtml(row.id)}">
-        <td>${escapeHtml(row.line ?? "")}</td>
+        <td>${escapeHtml(valueOr(row.line, ""))}</td>
         <td class="structured-tag">${escapeHtml(row.tag || "")}</td>
-        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(row.description ?? "")}"></td>
+        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.description, ""))}"></td>
         ${cells}
       </tr>`;
     })
@@ -433,13 +438,13 @@ async function openPathEditor(path = "") {
 function clonePathPoints(points) {
   return points.map((point, index) => ({
     index,
-    s_m: Number(point.s_m ?? 0),
+    s_m: Number(valueOr(point.s_m, 0)),
     x_m: Number(point.x_m),
     y_m: Number(point.y_m),
-    psi_rad: Number(point.psi_rad ?? 0),
-    kappa_radpm: Number(point.kappa_radpm ?? 0),
-    vx_mps: Number(point.vx_mps ?? 0),
-    ax_mps2: Number(point.ax_mps2 ?? 0),
+    psi_rad: Number(valueOr(point.psi_rad, 0)),
+    kappa_radpm: Number(valueOr(point.kappa_radpm, 0)),
+    vx_mps: Number(valueOr(point.vx_mps, 0)),
+    ax_mps2: Number(valueOr(point.ax_mps2, 0)),
   }));
 }
 
@@ -839,11 +844,13 @@ function setPathMode(mode) {
 function renderPathModeButtons() {
   $("pathSelectMode").classList.toggle("active", state.pathEditor.mode === "move");
   $("pathAddMode").classList.toggle("active", state.pathEditor.mode === "add");
-  $("pathRangeMode")?.classList.toggle("active", state.pathEditor.mode === "range");
+  const rangeButton = $("pathRangeMode");
+  if (rangeButton) rangeButton.classList.toggle("active", state.pathEditor.mode === "range");
 }
 
 function pathIsCircular() {
-  return Boolean(state.pathEditor.data?.circular ?? true);
+  const data = state.pathEditor.data;
+  return Boolean(data && data.circular !== null && data.circular !== undefined ? data.circular : true);
 }
 
 function renderPathSmoothButtons() {
@@ -1144,10 +1151,12 @@ async function loadSelectedPath() {
 }
 
 async function savePathEditor() {
+  const source = state.pathEditor.data && state.pathEditor.data.source ? state.pathEditor.data.source : {};
   const data = await api("/api/path-editor/save", {
     method: "POST",
     body: JSON.stringify({
-      source_path: state.pathEditor.data?.source?.path,
+      config_path: state.pathEditor.data ? state.pathEditor.data.config_path : null,
+      source_path: source.path,
       target_path: $("pathTarget").value,
       switch_config: $("pathSwitchConfig").checked,
       auto_rebuild: $("pathAutoBuild").checked,
@@ -1181,7 +1190,7 @@ async function rememberSelectedControlMethod(method) {
     body: JSON.stringify({ method }),
   });
   state.app.selected_control_method = data.method;
-  state.app.files = data.files || state.app.catalog?.[data.method] || [];
+  state.app.files = data.files || (state.app.catalog && state.app.catalog[data.method]) || [];
   renderState();
   if (!state.app.files.some((file) => file.path === state.currentFile) && state.app.files.length) {
     await openFile(state.app.files[0].path);
@@ -1222,7 +1231,7 @@ async function saveFile(autoRebuild) {
   state.currentContent = $("fileEditor").value;
   if (data.changed) {
     toast("保存したよ。バックアップも作成済み");
-  } else if (structuredApply?.descriptions_changed) {
+  } else if (structuredApply && structuredApply.descriptions_changed) {
     toast("descriptionを保存したよ");
   } else {
     toast("変更なし");
@@ -1434,7 +1443,7 @@ function renderMotionDomainPicker(data) {
 }
 
 function renderMotionLog(data) {
-  if (!data.points?.length) {
+  if (!(data.points && data.points.length)) {
     renderMotionEmpty("このrunには表示できるmotion sampleがないよ。");
     return;
   }
@@ -1442,10 +1451,10 @@ function renderMotionLog(data) {
   const stats = data.stats || {};
   $("motionStats").innerHTML = `
     <dt>duration</dt><dd>${fmtSec(stats.duration_sec)}</dd>
-    <dt>samples</dt><dd>${escapeHtml(stats.samples ?? "-")}</dd>
+    <dt>samples</dt><dd>${escapeHtml(valueOr(stats.samples, "-"))}</dd>
     <dt>max speed</dt><dd>${fmtNum(stats.max_speed_mps, 3, " m/s")}</dd>
     <dt>max accel</dt><dd>${fmtNum(stats.max_abs_acceleration_mps2, 3, " m/s²")}</dd>
-    <dt>max steer</dt><dd>${fmtNum(stats.max_abs_steering_rad ?? stats.max_abs_command_steering_rad, 3, " rad")}</dd>
+    <dt>max steer</dt><dd>${fmtNum(valueOr(stats.max_abs_steering_rad, stats.max_abs_command_steering_rad), 3, " rad")}</dd>
   `;
   const links = Object.entries(data.paths || {})
     .filter(([, path]) => path)
@@ -1604,7 +1613,7 @@ function chartColor(name) {
 }
 
 function escapeHtml(value) {
-  return String(value ?? "")
+  return String(valueOr(value, ""))
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -1669,7 +1678,8 @@ function bind() {
   $("pathZoomOut").addEventListener("click", () => zoomPathView(0.86));
   $("pathSelectMode").addEventListener("click", () => setPathMode("move"));
   $("pathAddMode").addEventListener("click", () => setPathMode("add"));
-  $("pathRangeMode")?.addEventListener("click", () => setPathMode("range"));
+  const pathRangeMode = $("pathRangeMode");
+  if (pathRangeMode) pathRangeMode.addEventListener("click", () => setPathMode("range"));
   $("pathDeletePoint").addEventListener("click", deleteSelectedPathPoint);
   $("pathSmooth").addEventListener("click", applyPathSmoothing);
   $("pathUndoSmooth").addEventListener("click", undoPathSmoothing);
@@ -1685,7 +1695,7 @@ function bind() {
     if (state.editorMode === "path") {
       drawPathEditor();
     }
-    if (state.motion.data?.points?.length) {
+    if (state.motion.data && state.motion.data.points && state.motion.data.points.length) {
       drawMotionChart(state.motion.data.points);
     }
   });

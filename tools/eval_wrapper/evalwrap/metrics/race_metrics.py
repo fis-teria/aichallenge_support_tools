@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from evalwrap.metrics.event_detector import Event, events_from_counts, events_from_log_excerpts, events_from_rosbag
+from evalwrap.metrics.control_metrics import summarize_control_timeseries
 from evalwrap.metrics.judgement import judge_domain
 from evalwrap.parsers.details_parser import ParsedDetails
 from evalwrap.parsers.log_parser import ParsedLogs
@@ -31,6 +32,9 @@ class DomainMetrics:
     steer_oscillation_score: float | None = None
     max_accel_mps2: float | None = None
     max_decel_mps2: float | None = None
+    max_command_accel_mps2: float | None = None
+    max_command_decel_mps2: float | None = None
+    max_command_abs_steer_rad: float | None = None
     avg_path_error_m: float | None = None
     max_path_error_m: float | None = None
     trajectory_source: str | None = None
@@ -49,7 +53,10 @@ class DomainResult:
     log_excerpts: list[dict[str, object]]
     vehicle_timeseries: list[dict[str, object]]
     control_timeseries: list[dict[str, object]]
+    delay_debug_timeseries: list[dict[str, object]]
+    speed_profile_debug_timeseries: list[dict[str, object]]
     section_summary: list[dict[str, object]]
+    awsim_section_summary: list[dict[str, object]]
     corner_summary: list[dict[str, object]]
     trajectory_reference: list[dict[str, object]]
 
@@ -91,6 +98,7 @@ def build_domain_result(
     if not rosbag.available and rosbag.reason:
         warnings.append(rosbag.reason)
     rosbag_metrics = rosbag.metrics
+    control_metrics = summarize_control_timeseries([dict(item) for item in rosbag.control_timeseries])
     metrics = DomainMetrics(
         finish=summary.finish,
         total_time_sec=summary.total_time_sec,
@@ -107,6 +115,9 @@ def build_domain_result(
         steer_oscillation_score=_optional_float(rosbag_metrics.get("steer_oscillation_score")),
         max_accel_mps2=_optional_float(rosbag_metrics.get("max_accel_mps2")),
         max_decel_mps2=_optional_float(rosbag_metrics.get("max_decel_mps2")),
+        max_command_accel_mps2=_optional_float(control_metrics.get("max_command_accel_mps2")),
+        max_command_decel_mps2=_optional_float(control_metrics.get("max_command_decel_mps2")),
+        max_command_abs_steer_rad=_optional_float(control_metrics.get("max_command_abs_steer_rad")),
         avg_path_error_m=_optional_float(rosbag_metrics.get("avg_path_error_m")),
         max_path_error_m=_optional_float(rosbag_metrics.get("max_path_error_m")),
         trajectory_source=rosbag.trajectory_source,
@@ -126,7 +137,10 @@ def build_domain_result(
         log_excerpts=[asdict(item) for item in logs.excerpts],
         vehicle_timeseries=[dict(item) for item in rosbag.vehicle_timeseries],
         control_timeseries=[dict(item) for item in rosbag.control_timeseries],
+        delay_debug_timeseries=[dict(item) for item in rosbag.delay_debug_timeseries],
+        speed_profile_debug_timeseries=[dict(item) for item in rosbag.speed_profile_debug_timeseries],
         section_summary=[dict(item) for item in rosbag.section_summary],
+        awsim_section_summary=[dict(item) for item in rosbag.awsim_section_summary],
         corner_summary=[dict(item) for item in rosbag.corner_summary],
         trajectory_reference=[dict(item) for item in rosbag.trajectory_reference],
     )
@@ -143,10 +157,14 @@ def write_processed_outputs(run_id: str, domains: list[DomainResult], processed_
     (processed_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     _write_lap_summary(run_id, domains, processed_dir / "lap_summary.csv")
     _write_section_summary(run_id, domains, processed_dir / "section_summary.csv")
+    _write_awsim_section_summary(run_id, domains, processed_dir / "awsim_section_summary.csv")
     _write_corner_summary(run_id, domains, processed_dir / "corner_summary.csv")
     _write_trajectory_reference(run_id, domains, processed_dir / "trajectory_reference.csv")
     _write_vehicle_timeseries(run_id, domains, processed_dir / "vehicle_timeseries.csv")
     _write_control_timeseries(run_id, domains, processed_dir / "control_timeseries.csv")
+    _write_delay_debug_timeseries(run_id, domains, processed_dir / "delay_aware_debug.csv")
+    _write_speed_profile_debug_timeseries(run_id, domains, processed_dir / "speed_profile_debug.csv")
+    _write_grade_profile(run_id, domains, processed_dir / "grade_profile.csv")
     _write_motion_log(run_id, domains, processed_dir / "motion_log.csv")
     _write_events(domains, processed_dir / "events.csv")
     return metrics
@@ -215,6 +233,32 @@ def _write_section_summary(run_id: str, domains: list[DomainResult], path: Path)
                 writer.writerow(_row_with_run_domain(row, run_id, domain.domain_id, fieldnames))
 
 
+def _write_awsim_section_summary(run_id: str, domains: list[DomainResult], path: Path) -> None:
+    fieldnames = [
+        "run_id",
+        "domain_id",
+        "lap",
+        "section",
+        "entry_time_sec",
+        "exit_time_sec",
+        "entry_lap_time_sec",
+        "exit_lap_time_sec",
+        "duration_sec",
+        "avg_speed_mps",
+        "max_speed_mps",
+        "min_speed_mps",
+        "avg_path_error_m",
+        "max_path_error_m",
+        "sample_count",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for domain in domains:
+            for row in domain.awsim_section_summary:
+                writer.writerow(_row_with_run_domain(row, run_id, domain.domain_id, fieldnames))
+
+
 def _write_vehicle_timeseries(run_id: str, domains: list[DomainResult], path: Path) -> None:
     fieldnames = [
         "run_id",
@@ -222,11 +266,17 @@ def _write_vehicle_timeseries(run_id: str, domains: list[DomainResult], path: Pa
         "time_sec",
         "x_m",
         "y_m",
+        "z_m",
         "distance_m",
         "section",
         "corner_id",
         "track_s_m",
         "trajectory_curvature_1pm",
+        "trajectory_z_m",
+        "trajectory_grade_percent",
+        "grade_percent",
+        "grade_rad",
+        "grade_source",
         "speed_mps",
         "acceleration_mps2",
         "steering_rad",
@@ -280,7 +330,10 @@ def _write_trajectory_reference(run_id: str, domains: list[DomainResult], path: 
         "point_index",
         "x_m",
         "y_m",
+        "z_m",
         "track_s_m",
+        "grade_percent",
+        "grade_rad",
         "trajectory_curvature_1pm",
         "corner_id",
         "trajectory_source",
@@ -312,6 +365,138 @@ def _write_control_timeseries(run_id: str, domains: list[DomainResult], path: Pa
                 writer.writerow(_row_with_run_domain(row, run_id, domain.domain_id, fieldnames))
 
 
+def _write_delay_debug_timeseries(run_id: str, domains: list[DomainResult], path: Path) -> None:
+    preferred = [
+        "time_sec",
+        "mode",
+        "shifted",
+        "delay_sec",
+        "prediction_steps",
+        "steering_source",
+        "estimated_current_steering_rad",
+        "applied_steering_rad",
+        "input_pose_x",
+        "input_pose_y",
+        "input_pose_yaw",
+        "input_pose_velocity",
+        "input_pose_yaw_rate",
+        "delayed_pose_x",
+        "delayed_pose_y",
+        "delayed_pose_yaw",
+    ]
+    _write_dynamic_timeseries(run_id, domains, path, "delay_debug_timeseries", preferred)
+
+
+def _write_speed_profile_debug_timeseries(run_id: str, domains: list[DomainResult], path: Path) -> None:
+    preferred = [
+        "time_sec",
+        "wp_id",
+        "source",
+        "target_speed_mps",
+        "curvature_speed_mps",
+        "section_cap_mps",
+        "global_cap_mps",
+        "actual_speed_mps",
+        "command_speed_mps",
+        "use_curvature_speed_profile",
+        "use_ref_vel_as_speed_cap",
+        "lateral_target_mode",
+        "wall_margin_m",
+        "use_grade_accel_feedforward",
+        "grade_percent",
+        "grade_accel_base_mps2",
+        "grade_accel_ff_mps2",
+    ]
+    _write_dynamic_timeseries(run_id, domains, path, "speed_profile_debug_timeseries", preferred)
+
+
+def _write_dynamic_timeseries(
+    run_id: str,
+    domains: list[DomainResult],
+    path: Path,
+    attr_name: str,
+    preferred_fieldnames: list[str],
+) -> None:
+    rows_by_domain: list[tuple[str, dict[str, object]]] = []
+    dynamic_fields: set[str] = set()
+    for domain in domains:
+        for row in getattr(domain, attr_name):
+            rows_by_domain.append((domain.domain_id, row))
+            dynamic_fields.update(str(key) for key in row)
+
+    extra_fields = sorted(dynamic_fields.difference(preferred_fieldnames))
+    fieldnames = ["run_id", "domain_id", *preferred_fieldnames, *extra_fields]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for domain_id, row in rows_by_domain:
+            writer.writerow(_row_with_run_domain(row, run_id, domain_id, fieldnames))
+
+
+def _write_grade_profile(run_id: str, domains: list[DomainResult], path: Path) -> None:
+    fieldnames = [
+        "run_id",
+        "domain_id",
+        "time_sec",
+        "distance_m",
+        "track_s_m",
+        "x_m",
+        "y_m",
+        "z_m",
+        "trajectory_z_m",
+        "grade_percent",
+        "grade_rad",
+        "grade_source",
+        "speed_mps",
+        "target_speed_mps",
+        "acceleration_mps2",
+        "command_accel_mps2",
+        "grade_accel_base_mps2",
+        "grade_accel_ff_mps2",
+        "command_steer_rad",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for domain in domains:
+            for vehicle in domain.vehicle_timeseries:
+                if not _has_grade_profile_signal(vehicle):
+                    continue
+                time_sec = _optional_float(vehicle.get("time_sec"))
+                control = _nearest_control_row(domain.control_timeseries, time_sec)
+                speed_debug = _nearest_control_row(domain.speed_profile_debug_timeseries, time_sec)
+                writer.writerow(
+                    {
+                        "run_id": run_id,
+                        "domain_id": domain.domain_id,
+                        "time_sec": vehicle.get("time_sec", ""),
+                        "distance_m": vehicle.get("distance_m", ""),
+                        "track_s_m": vehicle.get("track_s_m", ""),
+                        "x_m": vehicle.get("x_m", ""),
+                        "y_m": vehicle.get("y_m", ""),
+                        "z_m": vehicle.get("z_m", ""),
+                        "trajectory_z_m": vehicle.get("trajectory_z_m", ""),
+                        "grade_percent": vehicle.get("grade_percent", ""),
+                        "grade_rad": vehicle.get("grade_rad", ""),
+                        "grade_source": vehicle.get("grade_source", ""),
+                        "speed_mps": vehicle.get("speed_mps", ""),
+                        "target_speed_mps": control.get("target_speed_mps", "") if control else "",
+                        "acceleration_mps2": vehicle.get("acceleration_mps2", ""),
+                        "command_accel_mps2": control.get("accel_mps2", "") if control else "",
+                        "grade_accel_base_mps2": speed_debug.get("grade_accel_base_mps2", "") if speed_debug else "",
+                        "grade_accel_ff_mps2": speed_debug.get("grade_accel_ff_mps2", "") if speed_debug else "",
+                        "command_steer_rad": control.get("steer_rad", "") if control else "",
+                    }
+                )
+
+
+def _has_grade_profile_signal(row: dict[str, object]) -> bool:
+    return any(
+        row.get(key) not in (None, "")
+        for key in ("grade_percent", "trajectory_grade_percent")
+    )
+
+
 def _write_motion_log(run_id: str, domains: list[DomainResult], path: Path) -> None:
     fieldnames = [
         "run_id",
@@ -319,9 +504,13 @@ def _write_motion_log(run_id: str, domains: list[DomainResult], path: Path) -> N
         "time_sec",
         "speed_mps",
         "acceleration_mps2",
+        "grade_percent",
+        "grade_source",
         "steering_rad",
         "target_speed_mps",
         "command_accel_mps2",
+        "grade_accel_base_mps2",
+        "grade_accel_ff_mps2",
         "command_steer_rad",
         "throttle",
         "brake",
@@ -334,6 +523,7 @@ def _write_motion_log(run_id: str, domains: list[DomainResult], path: Path) -> N
                 for vehicle in domain.vehicle_timeseries:
                     time_sec = _optional_float(vehicle.get("time_sec"))
                     control = _nearest_control_row(domain.control_timeseries, time_sec)
+                    speed_debug = _nearest_control_row(domain.speed_profile_debug_timeseries, time_sec)
                     writer.writerow(
                         {
                             "run_id": run_id,
@@ -341,9 +531,13 @@ def _write_motion_log(run_id: str, domains: list[DomainResult], path: Path) -> N
                             "time_sec": vehicle.get("time_sec", ""),
                             "speed_mps": vehicle.get("speed_mps", ""),
                             "acceleration_mps2": vehicle.get("acceleration_mps2", ""),
+                            "grade_percent": vehicle.get("grade_percent", ""),
+                            "grade_source": vehicle.get("grade_source", ""),
                             "steering_rad": vehicle.get("steering_rad", ""),
                             "target_speed_mps": control.get("target_speed_mps", "") if control else "",
                             "command_accel_mps2": control.get("accel_mps2", "") if control else "",
+                            "grade_accel_base_mps2": speed_debug.get("grade_accel_base_mps2", "") if speed_debug else "",
+                            "grade_accel_ff_mps2": speed_debug.get("grade_accel_ff_mps2", "") if speed_debug else "",
                             "command_steer_rad": control.get("steer_rad", "") if control else "",
                             "throttle": control.get("throttle", "") if control else "",
                             "brake": control.get("brake", "") if control else "",
@@ -359,9 +553,13 @@ def _write_motion_log(run_id: str, domains: list[DomainResult], path: Path) -> N
                         "time_sec": control.get("time_sec", ""),
                         "speed_mps": "",
                         "acceleration_mps2": "",
+                        "grade_percent": "",
+                        "grade_source": "",
                         "steering_rad": "",
                         "target_speed_mps": control.get("target_speed_mps", ""),
                         "command_accel_mps2": control.get("accel_mps2", ""),
+                        "grade_accel_base_mps2": "",
+                        "grade_accel_ff_mps2": "",
                         "command_steer_rad": control.get("steer_rad", ""),
                         "throttle": control.get("throttle", ""),
                         "brake": control.get("brake", ""),
