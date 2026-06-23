@@ -22,6 +22,64 @@ tools/evalwrap ingest --label manual --path output/latest
 tools/run_tuning_gui.bash --background
 ```
 
+## Ubuntu 22.04 NVIDIA セットアップスクリプト
+
+Ubuntu 22.04 環境で `nvidia-smi`、`nvcc`、NVIDIA Container Toolkit を
+まとめて導入する補助スクリプトを用意しています。
+
+```bash
+tools/scripts/install_nvidia_stack_ubuntu2204.sh
+```
+
+このスクリプトは次の処理を行います。
+
+- Ubuntu 22.04 / amd64 以外では停止します。
+- 既存の NVIDIA driver 系パッケージを検出し、削除候補を表示します。
+- 削除前に `apt-get -s purge` の dry-run を表示します。
+- `REMOVE_NVIDIA_DRIVER_PACKAGES` と正確に入力した場合だけ driver 系を削除します。
+- `cuda-*`、`nvidia-cuda-toolkit`、`nvidia-container-toolkit`、
+  `libnvidia-container*` は driver cleanup の削除対象から除外します。
+- NVIDIA driver、CUDA Toolkit、NVIDIA Container Toolkit を導入します。
+- Docker がある場合、確認後に `nvidia-ctk runtime configure --runtime=docker`
+  と Docker restart を実行できます。
+
+通常はデフォルト設定で実行します。
+
+```bash
+tools/scripts/install_nvidia_stack_ubuntu2204.sh
+```
+
+driver を明示したい場合は `DRIVER_SPEC` を指定します。
+
+```bash
+DRIVER_SPEC=595-open tools/scripts/install_nvidia_stack_ubuntu2204.sh
+```
+
+CUDA Toolkit のバージョンを変えたい場合は `CUDA_TOOLKIT_PACKAGE` を指定します。
+
+```bash
+CUDA_TOOLKIT_PACKAGE=cuda-toolkit-12-8 tools/scripts/install_nvidia_stack_ubuntu2204.sh
+```
+
+Docker runtime 設定まで確認なしで進めたい場合:
+
+```bash
+CONFIGURE_DOCKER=yes tools/scripts/install_nvidia_stack_ubuntu2204.sh
+```
+
+実行後は再起動してから確認します。
+
+```bash
+nvidia-smi
+/usr/local/cuda/bin/nvcc --version
+nvidia-ctk --version
+docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
+```
+
+`nvidia-smi` がインストール直後に失敗する場合でも、driver module や
+`/dev/nvidia*` の反映に再起動が必要なことがあります。まず再起動後に
+再確認してください。
+
 ## tuning GUI ヘッドレス連携パッチ
 
 `tuning_gui` から control method、AWSIM ヘッドレス、NPC 台数を切り替えるには、
