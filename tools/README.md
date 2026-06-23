@@ -22,82 +22,10 @@ tools/evalwrap ingest --label manual --path output/latest
 tools/run_tuning_gui.bash --background
 ```
 
-## Ubuntu 22.04 NVIDIA セットアップスクリプト
+## 初心者向け資料
 
-Ubuntu 22.04 環境で `nvidia-smi`、`nvcc`、NVIDIA Container Toolkit を
-まとめて導入する補助スクリプトを用意しています。
-
-```bash
-tools/scripts/install_nvidia_stack_ubuntu2204.sh
-```
-
-このスクリプトは次の処理を行います。
-
-- Ubuntu 22.04 / amd64 以外では停止します。
-- 既存の NVIDIA driver 系パッケージを検出し、削除候補を表示します。
-- 削除前に `apt-get -s purge` の dry-run を表示します。
-- `REMOVE_NVIDIA_DRIVER_PACKAGES` と正確に入力した場合だけ driver 系を削除します。
-- cleanup 対象には `nvidia-compute-utils-*`、`nvidia-dkms-*`、
-  `nvidia-kernel-*`、`linux-modules-nvidia-*`、`linux-objects-nvidia-*`、
-  `linux-signatures-nvidia-*` も含めます。
-- `cuda-*`、`nvidia-cuda-toolkit`、`nvidia-container-toolkit`、
-  `libnvidia-container*` は driver cleanup の削除対象から除外します。
-- NVIDIA driver、CUDA Toolkit、NVIDIA Container Toolkit を導入します。
-- Docker がある場合、確認後に `nvidia-ctk runtime configure --runtime=docker`
-  と Docker restart を実行できます。
-
-通常はデフォルト設定で実行します。
-
-```bash
-tools/scripts/install_nvidia_stack_ubuntu2204.sh
-```
-
-driver を明示したい場合は `DRIVER_SPEC` を指定します。
-
-```bash
-DRIVER_SPEC=595-open tools/scripts/install_nvidia_stack_ubuntu2204.sh
-```
-
-古い driver を固定したい場合は `HOLD_NVIDIA_DRIVER=yes` を付けます。
-
-```bash
-DRIVER_SPEC=595-open HOLD_NVIDIA_DRIVER=yes tools/scripts/install_nvidia_stack_ubuntu2204.sh
-```
-
-固定済みの環境で別バージョンへ変更したい場合は、先に hold を解除します。
-
-```bash
-UNHOLD_NVIDIA_DRIVER=yes DRIVER_SPEC=535 tools/scripts/install_nvidia_stack_ubuntu2204.sh
-```
-
-`HOLD_NVIDIA_DRIVER=yes` と `DRIVER_SPEC=auto` を組み合わせると、
-`ubuntu-drivers` が選んだ版をそのまま固定します。古い版を意図して固定する場合は、
-`DRIVER_SPEC=595-open` や `DRIVER_SPEC=535` のように明示してください。
-
-CUDA Toolkit のバージョンを変えたい場合は `CUDA_TOOLKIT_PACKAGE` を指定します。
-
-```bash
-CUDA_TOOLKIT_PACKAGE=cuda-toolkit-12-8 tools/scripts/install_nvidia_stack_ubuntu2204.sh
-```
-
-Docker runtime 設定まで確認なしで進めたい場合:
-
-```bash
-CONFIGURE_DOCKER=yes tools/scripts/install_nvidia_stack_ubuntu2204.sh
-```
-
-実行後は再起動してから確認します。
-
-```bash
-nvidia-smi
-/usr/local/cuda/bin/nvcc --version
-nvidia-ctk --version
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
-```
-
-`nvidia-smi` がインストール直後に失敗する場合でも、driver module や
-`/dev/nvidia*` の反映に再起動が必要なことがあります。まず再起動後に
-再確認してください。
+- [Tuning GUI 変更点ガイド ROS 2 初心者向け](docs/tuning_gui_changes_for_ros2_beginners.md)
+- [evalwrap レポート出力ガイド ROS 2 初心者向け](docs/evalwrap_report_outputs_for_ros2_beginners.md)
 
 ## tuning GUI ヘッドレス連携パッチ
 
@@ -128,12 +56,16 @@ tools/scripts/apply_headless_overrides.sh --restore --backup-dir tools/scripts/b
 このパッチで上書きする主な内容:
 
 - `docker-compose.yml` は `CONTROL_METHOD`、`LAUNCH_AWSIM`、`RUN_RVIZ`、
-  `AWSIM_VEHICLES`、`AWSIM_LAPS`、`AWSIM_TIMEOUT`、`AWSIM_EXTRA_ARGS`
-  を Autoware コンテナへ渡します。
+  `AWSIM_START_MODE`、`AWSIM_START_COUNT_SECONDS`、`AWSIM_VEHICLES`、
+  `AWSIM_LAPS`、`AWSIM_TIMEOUT`、`AWSIM_EXTRA_ARGS` を Autoware/AWSIM
+  コンテナへ渡します。
 - `aichallenge/run_evaluation.bash` は上記の環境変数を
   `evaluation.launch.xml` の launch 引数へ変換します。ヘッドレス時は
   `AWSIM_EXTRA_ARGS='-batchmode -nographics --camera false --lidar false'`
   を渡し、AWSIM を起動したまま画面描画と重いセンサ描画を抑えます。
+- `aichallenge/run_simulator.bash` は dev 側のAWSIM起動でも
+  `AWSIM_START_MODE`、`AWSIM_VEHICLES`、`AWSIM_LAPS`、`AWSIM_TIMEOUT`
+  を受け取り、Tuning GUIのSafety GateやSimulator設定と同じ起動経路を使います。
 - `aichallenge/run_autoware.bash` は `CONTROL_METHOD` を通常 dev 起動にも
   渡します。`aichallenge/build_autoware.bash` は
   `COLCON_PARALLEL_WORKERS` を見て、重い環境では並列数を絞れるようにしています。
